@@ -20,6 +20,8 @@ class SchemaInspector
 
     private ?Builder $builderInstance = null;
 
+    private ?string $driver = null;
+
     public function __construct(?string $connection = null)
     {
         $this->connection = $connection;
@@ -95,12 +97,18 @@ class SchemaInspector
             $tableName = $table['name'];
             $unprefixed = $this->stripPrefix($tableName, $prefix);
 
+            $rawForeignKeys = $builder->getForeignKeys($unprefixed);
+
+            if (empty($rawForeignKeys) && $this->connectionDriver() === 'sqlite') {
+                $rawForeignKeys = $this->sqliteForeignKeys($unprefixed);
+            }
+
             $tables[] = [
                 'name' => $tableName,
                 'comment' => $table['comment'] ?? null,
                 'columns' => $this->normalizeColumns($builder->getColumns($unprefixed)),
                 'indexes' => $this->normalizeIndexes($builder->getIndexes($unprefixed)),
-                'foreign_keys' => $this->normalizeForeignKeys($builder->getForeignKeys($unprefixed)),
+                'foreign_keys' => $this->normalizeForeignKeys($rawForeignKeys),
             ];
         }
 
@@ -218,8 +226,11 @@ class SchemaInspector
     protected function normalizeForeignKeys(array $foreignKeys): array
     {
         return array_map(function (array $foreignKey) {
-            $columns = $foreignKey['columns'] ?? [];
-            $foreignColumns = $foreignKey['foreign_columns'] ?? [];
+            $columns = $foreignKey['columns'] ?? $foreignKey['column'] ?? [];
+            $foreignColumns = $foreignKey['foreign_columns']
+                ?? $foreignKey['references']
+                ?? $foreignKey['referenced_columns']
+                ?? [];
 
             if (is_string($columns)) {
                 $columns = explode(',', $columns);
@@ -229,15 +240,64 @@ class SchemaInspector
                 $foreignColumns = explode(',', $foreignColumns);
             }
 
+            $foreignTable = $foreignKey['foreign_table']
+                ?? $foreignKey['on']
+                ?? $foreignKey['referenced_table']
+                ?? $foreignKey['referenced_table_name']
+                ?? null;
+
             return [
                 'name' => $foreignKey['name'] ?? null,
                 'columns' => array_values(array_filter(array_map('trim', $columns))),
-                'foreign_table' => $foreignKey['foreign_table'] ?? null,
+                'foreign_table' => $foreignTable,
                 'foreign_columns' => array_values(array_filter(array_map('trim', $foreignColumns))),
-                'on_update' => $foreignKey['on_update'] ?? null,
-                'on_delete' => $foreignKey['on_delete'] ?? null,
+                'on_update' => $foreignKey['on_update'] ?? $foreignKey['onUpdate'] ?? null,
+                'on_delete' => $foreignKey['on_delete'] ?? $foreignKey['onDelete'] ?? null,
             ];
         }, $foreignKeys);
+    }
+
+    protected function sqliteForeignKeys(string $table): array
+    {
+        $connection = $this->connection();
+        $escapedName = str_replace("'", "''", $table);
+        $results = $connection->select("PRAGMA foreign_key_list('{$escapedName}')");
+
+        $grouped = [];
+
+        foreach ($results as $result) {
+            $id = $result->id ?? spl_object_id($result);
+
+            if (! isset($grouped[$id])) {
+                $grouped[$id] = [
+                    'name' => isset($result->id) ? sprintf('fk_%s_%s', $table, $result->id) : null,
+                    'columns' => [],
+                    'foreign_table' => $result->table ?? null,
+                    'foreign_columns' => [],
+                    'on_update' => $result->on_update ?? null,
+                    'on_delete' => $result->on_delete ?? null,
+                ];
+            }
+
+            $grouped[$id]['columns'][] = $result->from ?? null;
+            $grouped[$id]['foreign_columns'][] = $result->to ?? null;
+        }
+
+        return array_map(function (array $foreignKey) {
+            $foreignKey['columns'] = array_values(array_filter($foreignKey['columns'], fn ($value) => $value !== null && $value !== ''));
+            $foreignKey['foreign_columns'] = array_values(array_filter($foreignKey['foreign_columns'], fn ($value) => $value !== null && $value !== ''));
+
+            return $foreignKey;
+        }, array_values($grouped));
+    }
+
+    protected function connectionDriver(): ?string
+    {
+        if ($this->driver === null) {
+            $this->driver = $this->connection()->getDriverName();
+        }
+
+        return $this->driver;
     }
 
     /**
