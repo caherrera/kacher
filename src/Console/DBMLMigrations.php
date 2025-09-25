@@ -6,11 +6,12 @@ use Aphisitworachorch\Kacher\Controller\DBMLController;
 use Aphisitworachorch\Kacher\Support\SchemaInspector;
 use Doctrine\DBAL\Exception;
 use Illuminate\Console\Command;
-use Illuminate\Database\Migrations\Migrator;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Throwable;
+use RuntimeException;
 
 class DBMLMigrations extends Command
 {
@@ -27,25 +28,17 @@ class DBMLMigrations extends Command
 
         $customTypes = $this->customTypes();
         $originalDefault = config('database.default');
+        $result = self::SUCCESS;
 
         config(['database.default' => $connection]);
         DB::setDefaultConnection($connection);
 
-        $migrator = app(Migrator::class);
-        $migrator->setConnection($connection);
-        $migrator->setOutput($this->output);
-        $migrator->getRepository()->setSource($connection);
-
-        if (! $migrator->repositoryExists()) {
-            $migrator->getRepository()->createRepository();
-        }
-
-        $paths = $this->resolveMigrationPaths();
-
-        $result = self::SUCCESS;
-
         try {
-            $migrator->run($paths, ['step' => false]);
+            $migrationStatus = Artisan::call('migrate', $this->migrationOptions($connection), $this->output);
+
+            if ($migrationStatus !== self::SUCCESS) {
+                throw new RuntimeException('Failed to run migrations for DBML export.');
+            }
 
             $controller = new DBMLController($customTypes, new SchemaInspector($connection), $connection);
             $dbml = $controller->parseToDBML();
@@ -64,7 +57,7 @@ class DBMLMigrations extends Command
             $result = self::FAILURE;
         } finally {
             config(['database.default' => $originalDefault]);
-            DB::setDefaultConnection($originalDefault ?? config('database.default'));
+            DB::setDefaultConnection($originalDefault);
             $this->cleanupConnection($connection, $databasePath, $cleanupConnection);
         }
 
@@ -88,36 +81,22 @@ class DBMLMigrations extends Command
         return json_decode((string) file_get_contents($path), true) ?: null;
     }
 
-    protected function resolveMigrationPaths(): array
+    protected function migrationOptions(string $connection): array
     {
-        $paths = $this->option('path');
+        $options = [
+            '--database' => $connection,
+            '--force' => true,
+        ];
 
-        if (! is_array($paths) || count($paths) === 0) {
-            $paths = [database_path('migrations')];
+        $paths = array_values(array_filter($this->option('path'), function ($path) {
+            return is_string($path) && $path !== '';
+        }));
+
+        if (! empty($paths)) {
+            $options['--path'] = $paths;
         }
 
-        $resolved = [];
-
-        foreach ($paths as $path) {
-            if (! is_string($path) || $path === '') {
-                continue;
-            }
-
-            $resolved[] = $this->isAbsolutePath($path)
-                ? $path
-                : $this->laravel->basePath($path);
-        }
-
-        return array_values(array_unique($resolved));
-    }
-
-    protected function isAbsolutePath(string $path): bool
-    {
-        if (Str::startsWith($path, ['/', '\\'])) {
-            return true;
-        }
-
-        return strlen($path) > 1 && $path[1] === ':';
+        return $options;
     }
 
     protected function prepareConnection(?string $requested): array
