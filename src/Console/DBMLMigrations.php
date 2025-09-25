@@ -3,10 +3,12 @@
 namespace Aphisitworachorch\Kacher\Console;
 
 use Aphisitworachorch\Kacher\Controller\DBMLController;
+use Aphisitworachorch\Kacher\Support\Migration\MigrationDatabaseProxy;
 use Aphisitworachorch\Kacher\Support\Migration\MigrationSchemaBuilder;
 use Aphisitworachorch\Kacher\Support\Migration\MigrationSchemaCollector;
 use Illuminate\Console\Command;
 use Illuminate\Database\Migrations\Migration;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -28,8 +30,20 @@ class DBMLMigrations extends Command
         $collector = new MigrationSchemaCollector();
         $schemaBuilder = new MigrationSchemaBuilder($collector);
         $originalSchema = Schema::getFacadeRoot();
+        $originalDatabaseManager = DB::getFacadeRoot();
 
         Schema::swap($schemaBuilder);
+
+        if (! Schema::getFacadeRoot() instanceof MigrationSchemaBuilder) {
+            Schema::swap($originalSchema);
+            $this->error('Failed to initialize migration schema parser.');
+
+            return self::FAILURE;
+        }
+
+        if ($originalDatabaseManager !== null) {
+            DB::swap(new MigrationDatabaseProxy($originalDatabaseManager, $schemaBuilder));
+        }
 
         $result = self::SUCCESS;
 
@@ -60,6 +74,9 @@ class DBMLMigrations extends Command
             $result = self::FAILURE;
         } finally {
             Schema::swap($originalSchema);
+            if ($originalDatabaseManager !== null) {
+                DB::swap($originalDatabaseManager);
+            }
         }
 
         return $result;
