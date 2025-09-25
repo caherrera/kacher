@@ -3,62 +3,63 @@
 namespace Aphisitworachorch\Kacher\Console;
 
 use Aphisitworachorch\Kacher\Controller\DBMLController;
-use Aphisitworachorch\Kacher\Support\SchemaInspector;
-use Doctrine\DBAL\Exception;
+use Aphisitworachorch\Kacher\Support\Migration\MigrationSchemaBuilder;
+use Aphisitworachorch\Kacher\Support\Migration\MigrationSchemaCollector;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Artisan;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Throwable;
-use RuntimeException;
 
 class DBMLMigrations extends Command
 {
     protected $signature = 'dbml:migrations {--dbdocs} {--path=*} {--database=} {--custom}';
 
-    protected $description = 'Run migrations on a scratch database and export them to DBML.';
+    protected $description = 'Parse migration files and export the resulting schema to DBML.';
 
-    /**
-     * @throws Exception
-     */
     public function handle(): int
     {
-        [$connection, $databasePath, $cleanupConnection] = $this->prepareConnection($this->option('database'));
-
         $customTypes = $this->customTypes();
-        $originalDefault = config('database.default');
+        $connection = $this->option('database') ?: config('database.default');
+        $driver = $this->determineDriver($connection);
+        $databaseName = $this->determineDatabaseName($connection);
+
+        $collector = new MigrationSchemaCollector();
+        $schemaBuilder = new MigrationSchemaBuilder($collector);
+        $originalSchema = Schema::getFacadeRoot();
+
+        Schema::swap($schemaBuilder);
+
         $result = self::SUCCESS;
 
-        config(['database.default' => $connection]);
-        DB::setDefaultConnection($connection);
-
         try {
-            $migrationStatus = Artisan::call('migrate', $this->migrationOptions($connection), $this->output);
+            $this->processMigrations($collector);
 
-            if ($migrationStatus !== self::SUCCESS) {
-                throw new RuntimeException('Failed to run migrations for DBML export.');
-            }
+            $controller = new DBMLController(
+                $customTypes,
+                null,
+                $connection,
+                $collector->tables(),
+                $databaseName,
+                $driver
+            );
 
-            $controller = new DBMLController($customTypes, new SchemaInspector($connection), $connection);
             $dbml = $controller->parseToDBML();
+            $filePath = $this->writeDbmlFile($dbml, $databaseName);
 
-            $databaseName = $this->connectionDatabaseName($connection);
-            $fileName = $this->writeDbmlFile($dbml, $databaseName);
-            $this->info('Created ! File Path : '.$fileName);
+            $this->info('Created ! File Path : '.$filePath);
 
             if ($this->option('dbdocs') !== null) {
                 $password = Str::random(8);
                 $this->warn('Please Install dbdocs (npm install -g dbdocs) before run command');
-                $this->info("Now you can run with command : dbdocs build $fileName --project=$databaseName --password=$password");
+                $this->info("Now you can run with command : dbdocs build $filePath --project=$databaseName --password=$password");
             }
         } catch (Throwable $exception) {
             $this->error($exception->getMessage());
             $result = self::FAILURE;
         } finally {
-            config(['database.default' => $originalDefault]);
-            DB::setDefaultConnection($originalDefault);
-            $this->cleanupConnection($connection, $databasePath, $cleanupConnection);
+            Schema::swap($originalSchema);
         }
 
         return $result;
@@ -81,80 +82,128 @@ class DBMLMigrations extends Command
         return json_decode((string) file_get_contents($path), true) ?: null;
     }
 
-    protected function migrationOptions(string $connection): array
+    protected function determineDriver(?string $connection): string
     {
-        $options = [
-            '--database' => $connection,
-            '--force' => true,
-        ];
+        $connection = $connection ?: config('database.default');
+        $config = $connection ? config("database.connections.$connection") : [];
 
-        $paths = array_values(array_filter($this->option('path'), function ($path) {
-            return is_string($path) && $path !== '';
-        }));
-
-        if (! empty($paths)) {
-            $options['--path'] = $paths;
-        }
-
-        return $options;
+        return $config['driver'] ?? env('DB_CONNECTION', 'mysql');
     }
 
-    protected function prepareConnection(?string $requested): array
+    protected function determineDatabaseName(?string $connection): string
     {
-        $connection = $requested ?: 'kacher_migrations';
-        $cleanup = false;
-        $databasePath = null;
-
-        if (! config("database.connections.$connection")) {
-            $databasePath = storage_path('app/'.$connection.'.sqlite');
-            $this->initializeSqliteDatabase($databasePath);
-
-            config(["database.connections.$connection" => [
-                'driver' => 'sqlite',
-                'database' => $databasePath,
-                'prefix' => '',
-                'foreign_key_constraints' => true,
-            ]]);
-
-            $cleanup = true;
-        } else {
-            $existing = config("database.connections.$connection");
-            if (($existing['driver'] ?? null) === 'sqlite') {
-                $databasePath = $existing['database'] ?? null;
-                if ($databasePath && $databasePath !== ':memory:') {
-                    $this->initializeSqliteDatabase($databasePath);
-                }
-            }
-        }
-
-        return [$connection, $databasePath, $cleanup];
-    }
-
-    protected function initializeSqliteDatabase(string $path): void
-    {
-        $directory = dirname($path);
-
-        if (! is_dir($directory)) {
-            mkdir($directory, 0755, true);
-        }
-
-        if (file_exists($path)) {
-            unlink($path);
-        }
-
-        touch($path);
-    }
-
-    protected function connectionDatabaseName(string $connection): string
-    {
-        $config = config("database.connections.$connection", []);
-        $database = $config['database'] ?? $connection;
+        $connection = $connection ?: config('database.default');
+        $config = $connection ? config("database.connections.$connection") : [];
+        $database = $config['database'] ?? env('DB_DATABASE') ?? $connection ?? 'database';
 
         if (is_string($database) && str_contains($database, DIRECTORY_SEPARATOR)) {
             $database = pathinfo($database, PATHINFO_FILENAME);
         }
 
-        return $database ?: $connection;
+        return $database ?: 'database';
+    }
+
+    protected function processMigrations(MigrationSchemaCollector $collector): void
+    {
+        $paths = $this->resolveMigrationPaths();
+        $files = $this->gatherMigrationFiles($paths);
+
+        foreach ($files as $file) {
+            $migration = $this->resolveMigration($file);
+
+            if (! $migration instanceof Migration) {
+                continue;
+            }
+
+            if (method_exists($migration, 'up')) {
+                $migration->up();
+            }
+        }
+    }
+
+    protected function resolveMigrationPaths(): array
+    {
+        $paths = $this->option('path');
+
+        if (! is_array($paths) || $paths === []) {
+            $paths = [database_path('migrations')];
+        }
+
+        $resolved = [];
+
+        foreach ($paths as $path) {
+            if (! is_string($path) || $path === '') {
+                continue;
+            }
+
+            $absolute = $this->isAbsolutePath($path)
+                ? $path
+                : $this->laravel->basePath($path);
+
+            if (is_dir($absolute)) {
+                $resolved[] = $absolute;
+            }
+        }
+
+        return array_values(array_unique($resolved));
+    }
+
+    protected function gatherMigrationFiles(array $paths): array
+    {
+        $files = [];
+
+        foreach ($paths as $path) {
+            foreach (glob(rtrim($path, DIRECTORY_SEPARATOR).'/*.php') ?: [] as $file) {
+                $files[$this->migrationName($file)] = $file;
+            }
+        }
+
+        ksort($files);
+
+        return array_values($files);
+    }
+
+    protected function resolveMigration(string $file): ?Migration
+    {
+        $migration = require $file;
+
+        if ($migration instanceof Migration) {
+            return $migration;
+        }
+
+        $class = $this->migrationClass($file);
+
+        if ($class !== null && class_exists($class)) {
+            return app()->make($class);
+        }
+
+        return null;
+    }
+
+    protected function migrationClass(string $path): ?string
+    {
+        $file = basename($path, '.php');
+        $name = preg_replace('/^[0-9_]+/', '', $file);
+
+        if (! $name) {
+            return null;
+        }
+
+        return Str::studly($name);
+    }
+
+    protected function migrationName(string $path): string
+    {
+        return basename($path, '.php');
+    }
+
+    protected function isAbsolutePath(string $path): bool
+    {
+        if (Str::startsWith($path, ['/', '\\'])) {
+            return true;
+        }
+
+        return strlen($path) > 1 && $path[1] === ':';
     }
 
     protected function writeDbmlFile(string $content, string $database): string
@@ -166,23 +215,5 @@ class DBMLMigrations extends Command
         Storage::put($path, $content);
 
         return Storage::path($path);
-    }
-
-    protected function cleanupConnection(string $connection, ?string $databasePath, bool $cleanupConnection): void
-    {
-        DB::disconnect($connection);
-        DB::purge($connection);
-
-        if ($cleanupConnection) {
-            if ($databasePath && file_exists($databasePath)) {
-                unlink($databasePath);
-            }
-
-            $configRepository = app('config');
-
-            if (method_exists($configRepository, 'offsetUnset')) {
-                $configRepository->offsetUnset("database.connections.$connection");
-            }
-        }
     }
 }

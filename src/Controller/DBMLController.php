@@ -11,14 +11,29 @@ class DBMLController extends Controller
 {
     use DBMLSyntaxTraits;
 
-    private SchemaInspector $schemaInspector;
+    private ?SchemaInspector $schemaInspector;
 
     private ?string $connection;
 
-    public function __construct($custom_type = null, ?SchemaInspector $schemaInspector = null, ?string $connection = null)
+    private ?array $preloadedTables;
+
+    private ?string $databaseName;
+
+    private ?string $driver;
+
+    public function __construct($custom_type = null, ?SchemaInspector $schemaInspector = null, ?string $connection = null, ?array $tables = null, ?string $databaseName = null, ?string $driver = null)
     {
-        $this->schemaInspector = $schemaInspector ?? new SchemaInspector($connection);
-        $this->connection = $this->schemaInspector->connectionName() ?? $connection;
+        $this->preloadedTables = $tables;
+        $this->databaseName = $databaseName;
+        $this->driver = $driver;
+
+        if ($tables === null) {
+            $this->schemaInspector = $schemaInspector ?? new SchemaInspector($connection);
+            $this->connection = $this->schemaInspector->connectionName() ?? $connection;
+        } else {
+            $this->schemaInspector = $schemaInspector;
+            $this->connection = $schemaInspector?->connectionName() ?? $connection;
+        }
 
         /*if ($custom_type != null){
             foreach($custom_type as $ct => $key) {
@@ -162,7 +177,7 @@ class DBMLController extends Controller
 
     public function getDatabaseTable($type)
     {
-        $tables = $this->schemaInspector->tables();
+        $tables = $this->preloadedTables ?? ($this->schemaInspector?->tables() ?? []);
         $data = [];
 
         foreach ($tables as $table) {
@@ -196,8 +211,13 @@ class DBMLController extends Controller
         $connection = $this->connection ?? config('database.default');
         $config = $connection ? config("database.connections.$connection") : [];
 
-        $driver = $config['driver'] ?? env('DB_CONNECTION');
-        $database = $config['database'] ?? env('DB_DATABASE');
+        $driver = $this->driver
+            ?? $config['driver']
+            ?? env('DB_CONNECTION');
+
+        $database = $this->databaseName
+            ?? $config['database']
+            ?? env('DB_DATABASE');
 
         if (is_string($database) && str_contains($database, DIRECTORY_SEPARATOR)) {
             $database = pathinfo($database, PATHINFO_FILENAME);
