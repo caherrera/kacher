@@ -20,7 +20,7 @@ class MigrationSchemaCollector
 
         $this->tables[$tableName] = [
             'name' => $tableName,
-            'comment' => $blueprint->comment ?? null,
+            'comment' => $this->resolveTableComment($blueprint),
             'columns' => [],
             'indexes' => [],
             'foreign_keys' => [],
@@ -45,8 +45,9 @@ class MigrationSchemaCollector
         $tableName = $blueprint->getTable();
         $table = &$this->ensureTable($tableName);
 
-        if ($blueprint->comment !== null) {
-            $table['comment'] = $blueprint->comment;
+        $comment = $this->resolveTableComment($blueprint);
+        if ($comment !== null) {
+            $table['comment'] = $comment;
         }
 
         foreach ($blueprint->getColumns() as $column) {
@@ -232,6 +233,17 @@ class MigrationSchemaCollector
                 }
             }
         }
+    }
+
+    private function resolveTableComment(Blueprint $blueprint): ?string
+    {
+        foreach ($blueprint->getCommands() as $command) {
+            if (($command->name ?? null) === 'tableComment') {
+                return $command->comment ?? null;
+            }
+        }
+
+        return null;
     }
 
     private function removeColumnReferences(array &$table, string $column): void
