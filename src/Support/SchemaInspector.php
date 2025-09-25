@@ -25,6 +25,11 @@ class SchemaInspector
         $this->connection = $connection;
     }
 
+    public function connectionName(): ?string
+    {
+        return $this->connection;
+    }
+
     /**
      * Retrieve the connection instance.
      */

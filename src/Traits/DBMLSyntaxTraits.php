@@ -13,9 +13,12 @@ trait DBMLSyntaxTraits
             "sqlsrv" => "Microsoft SQL Server",
             "oracle" => "Oracle",
             "cockroach" => "CockroachDB",
+            "sqlite" => "SQLite",
         ];
 
-        $getDBAlias = $dbDecision[$database];
+        $database = $database !== null ? strtolower((string) $database) : 'mysql';
+        $getDBAlias = $dbDecision[$database] ?? ucfirst($database);
+        $name = $name ?: 'database';
         $body = "Project $name {\n";
         $body .= "\tdatabase_type: '$getDBAlias'\n";
         $body .= "}\n\n";

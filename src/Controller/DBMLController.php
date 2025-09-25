@@ -13,9 +13,12 @@ class DBMLController extends Controller
 
     private SchemaInspector $schemaInspector;
 
-    public function __construct($custom_type = null, ?SchemaInspector $schemaInspector = null)
+    private ?string $connection;
+
+    public function __construct($custom_type = null, ?SchemaInspector $schemaInspector = null, ?string $connection = null)
     {
-        $this->schemaInspector = $schemaInspector ?? new SchemaInspector();
+        $this->schemaInspector = $schemaInspector ?? new SchemaInspector($connection);
+        $this->connection = $this->schemaInspector->connectionName() ?? $connection;
 
         /*if ($custom_type != null){
             foreach($custom_type as $ct => $key) {
@@ -190,10 +193,17 @@ class DBMLController extends Controller
 
     public function getDatabasePlatform()
     {
-        $db = env('DB_CONNECTION');
-        $dbname = env('DB_DATABASE');
+        $connection = $this->connection ?? config('database.default');
+        $config = $connection ? config("database.connections.$connection") : [];
 
-        return $this->projectName($dbname, $db);
+        $driver = $config['driver'] ?? env('DB_CONNECTION');
+        $database = $config['database'] ?? env('DB_DATABASE');
+
+        if (is_string($database) && str_contains($database, DIRECTORY_SEPARATOR)) {
+            $database = pathinfo($database, PATHINFO_FILENAME);
+        }
+
+        return $this->projectName($database ?? 'database', $driver ?? 'mysql');
     }
 
     public function parseToDBML()

@@ -3,6 +3,7 @@
 namespace Aphisitworachorch\Kacher;
 
 use Aphisitworachorch\Kacher\Console\DBML;
+use Aphisitworachorch\Kacher\Console\DBMLMigrations;
 use Aphisitworachorch\Kacher\Console\DBMLParse;
 use Illuminate\Support\ServiceProvider;
 
@@ -18,6 +19,7 @@ class KacherServiceProvider extends ServiceProvider
         if($this->app->runningInConsole ()){
             $this->commands ([
                 DBML::class,
+                DBMLMigrations::class,
                 DBMLParse::class,
             ]);
         }
