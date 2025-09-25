@@ -1,5 +1,5 @@
 {
-    "name": "aphisitworachorch/kacher",
+    "name": "caherrera/kacher",
     "description": "Kacher is Laravel DB to DBML (dbdiagram.io/dbdocs.io)",
     "type": "package",
     "license": "MIT",
@@ -8,8 +8,8 @@
     ],
     "authors": [
         {
-            "name": "Arsanandha Aphisitworachorch",
-            "email": "arsanandha.ap@gmail.com"
+            "name": "Carlos Herrera",
+            "homepage": "https://github.com/caherrera"
         }
     ],
     "require": {
